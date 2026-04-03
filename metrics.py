@@ -53,11 +53,14 @@ def compute_outcome(
     return float(success + main_change + merged_pr)
 
 
+_SLEEP_PAT = re.compile(r"sleep\s+\d+", re.IGNORECASE)
+
+
 def compute_efficiency(trace: SessionTrace) -> float:
-    """Score 0–1: fewer steps + fewer loops/errors is better.
+    """Score 0–1: fewer steps + fewer loops/errors/sleeps is better.
 
     base = 1.0 if ≤10 tool calls, else max(0, 1 - (count-10)/40)
-    deductions: loop_count * 0.10 + error_count * 0.02
+    deductions: loop_count * 0.10 + error_count * 0.02 + sleep_count * 0.02
     """
     tool_calls = [e for e in trace.events if e.event_type == "tool_call"]
     count = len(tool_calls)
@@ -84,7 +87,12 @@ def compute_efficiency(trace: SessionTrace) -> float:
         if e.event_type == "tool_result" and error_pat.search(e.content)
     )
 
-    return round(max(0.0, base - loop_count * 0.10 - error_count * 0.02), 4)
+    sleep_count = sum(
+        1 for e in tool_calls
+        if e.tool_name in ("Bash", "bash") and _SLEEP_PAT.search(e.content)
+    )
+
+    return round(max(0.0, base - loop_count * 0.10 - error_count * 0.02 - sleep_count * 0.02), 4)
 
 
 def compute_integrity(classifications: list[EventClassification]) -> float:
@@ -118,9 +126,15 @@ def compute_behavioral(trace: SessionTrace) -> dict[str, Any]:
     write_count = sum(1 for e in tool_calls if e.tool_name in WRITE_TOOLS)
     total_rw    = read_count + write_count
 
+    sleep_count = sum(
+        1 for e in tool_calls
+        if e.tool_name in ("Bash", "bash") and _SLEEP_PAT.search(e.content)
+    )
+
     return {
         "loop_count":        loop_count,
         "retry_count":       error_count,
+        "sleep_count":       sleep_count,
         "exploration_ratio": round(read_count / total_rw, 4) if total_rw > 0 else 0.0,
         "total_tool_calls":  len(tool_calls),
         "read_calls":        read_count,

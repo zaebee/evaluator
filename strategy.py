@@ -83,7 +83,8 @@ def classify_strategy(
     if flag_set & _EXPLOIT_FLAGS or profile.exploit_tendency > 0.05:
         return "direct_exploiter"
 
-    if profile.persistence > 0.6 and profile.adaptivity < 0.3:
+    if (profile.persistence > 0.6 and profile.adaptivity < 0.3) or \
+            (profile.persistence > 0.8 and efficiency < 0.1):
         return "looper"
 
     if profile.adaptivity > 0.5 and profile.exploit_tendency < 0.05:

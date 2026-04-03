@@ -145,11 +145,12 @@ def main() -> None:
 
         logger.info(
             "  Scores: outcome=%.1f eff=%.2f integrity=%.2f final=%.2f | "
-            "strategy=%s tool_calls=%d loops=%d",
+            "strategy=%s tool_calls=%d loops=%d sleeps=%d",
             scores.outcome, scores.efficiency, scores.integrity, scores.final_score,
             strategy,
             behavioral["total_tool_calls"],
             behavioral["loop_count"],
+            behavioral["sleep_count"],
         )
 
         results.append(SessionResult(

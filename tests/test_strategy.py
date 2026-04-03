@@ -129,3 +129,11 @@ def test_stuck_no_outcome():
     profile = BehaviorProfile(persistence=0.1, adaptivity=0.3, exploit_tendency=0.0, rule_following=1.0)
     label = classify_strategy(profile, flags=[], outcome=0.0, efficiency=0.0)
     assert label == "stuck"
+
+
+def test_looper_high_persistence_near_zero_efficiency():
+    # Heavy poller: high persistence, adaptivity too high for old condition,
+    # but efficiency is near zero — should still be looper
+    profile = BehaviorProfile(persistence=0.9, adaptivity=0.4, exploit_tendency=0.0, rule_following=1.0)
+    label = classify_strategy(profile, flags=[], outcome=3.0, efficiency=0.05)
+    assert label == "looper"
