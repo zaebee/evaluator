@@ -474,15 +474,40 @@ def load_sessions(paths: list[str]) -> list[SessionTrace]:
                 except Exception as exc:
                     logger.warning("Failed to parse Mistral trace %s: %s", p, exc)
             else:
-                # Directory of Claude JSONL files
-                jsonl_files = sorted(p.glob("*.jsonl"))
-                if not jsonl_files:
-                    logger.warning("No .jsonl files found in directory: %s", p)
-                for jf in jsonl_files:
+                # Recursively discover sessions in nested directory structure.
+                # Order: Mistral session dirs → Claude JSONLs → OpenCode MDs
+
+                # 1. Mistral: subdirs that contain messages.jsonl + meta.json
+                mistral_dirs: set[Path] = set()
+                for msg_file in sorted(p.rglob("messages.jsonl")):
+                    session_dir = msg_file.parent
+                    if (session_dir / "meta.json").exists():
+                        mistral_dirs.add(session_dir)
+                        try:
+                            sessions.append(mistral.parse(session_dir))
+                        except Exception as exc:
+                            logger.warning("Failed to parse Mistral trace %s: %s", session_dir, exc)
+
+                # 2. Claude: .jsonl files not inside a Mistral session dir
+                for jf in sorted(p.rglob("*.jsonl")):
+                    if jf.name == "messages.jsonl":
+                        continue
+                    if any(jf.is_relative_to(d) for d in mistral_dirs):
+                        continue
                     try:
                         sessions.append(claude.parse(jf))
                     except Exception as exc:
                         logger.warning("Failed to parse %s: %s", jf, exc)
+
+                # 3. OpenCode: .md files
+                for mf in sorted(p.rglob("*.md")):
+                    try:
+                        sessions.append(opencode.parse(mf))
+                    except Exception as exc:
+                        logger.warning("Failed to parse OpenCode trace %s: %s", mf, exc)
+
+                if not sessions:
+                    logger.warning("No sessions found in directory: %s", p)
         elif p.is_file() and p.suffix == ".md":
             try:
                 sessions.append(opencode.parse(p))
