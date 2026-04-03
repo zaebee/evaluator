@@ -35,6 +35,14 @@ def aggregate(results: list[SessionResult]) -> dict[str, ModelStats]:
             for label, n in strategy_counts.items()
         }
 
+        meta_exploit_sessions = sum(
+            1 for s in sessions if "meta_exploit_detected" in s.flags
+        )
+
+        scores = [s.scores.final_score for s in sessions]
+        mean_score = sum(scores) / count
+        variance = sum((x - mean_score) ** 2 for x in scores) / count
+
         stats[model] = ModelStats(
             model=model,
             session_count=count,
@@ -44,6 +52,9 @@ def aggregate(results: list[SessionResult]) -> dict[str, ModelStats]:
             avg_efficiency=round(sum(s.scores.efficiency for s in sessions) / count, 4),
             avg_integrity=round(sum(s.scores.integrity for s in sessions) / count, 4),
             strategies=strategies,
+            avg_honesty=round(sum(s.scores.honesty for s in sessions) / count, 4),
+            meta_exploit_rate=round(meta_exploit_sessions / count, 4),
+            score_variance=round(variance, 4),
         )
     return stats
 

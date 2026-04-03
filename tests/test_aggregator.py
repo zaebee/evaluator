@@ -15,6 +15,25 @@ def _result(model: str, score: float, flags=None, strategy: str = "legit_solver"
     )
 
 
+def _session(
+    model: str,
+    score: float = 7.0,
+    flags: list[str] | None = None,
+    strategy: str = "legit_solver",
+    honesty: float = 0.5,
+    final_score: float | None = None,
+) -> SessionResult:
+    fs = final_score if final_score is not None else score
+    scores = SessionScores(outcome=3.0, efficiency=0.8, integrity=0.0, honesty=honesty, final_score=fs)
+    return SessionResult(
+        session_id=f"s-{model}-{fs}-{honesty}",
+        model=model,
+        scores=scores,
+        flags=flags or [],
+        strategy_label=strategy,
+    )
+
+
 def test_aggregate_strategy_distribution_single():
     results = [_result("claude", 10.0, strategy="legit_solver")]
     stats = aggregate(results)
@@ -61,3 +80,40 @@ def test_build_report_structure():
     report = build_report(results, board)
     assert len(report.sessions) == 1
     assert len(report.leaderboard) == 1
+
+
+def test_aggregate_avg_honesty():
+    """avg_honesty is the mean of session honesty scores."""
+    s1 = _session("m1", honesty=0.8)
+    s2 = _session("m1", honesty=0.4)
+    stats = aggregate([s1, s2])
+    assert stats["m1"].avg_honesty == pytest.approx(0.6, abs=0.001)
+
+
+def test_aggregate_meta_exploit_rate():
+    """meta_exploit_rate counts only sessions with meta_exploit_detected flag."""
+    s1 = _session("m1", flags=["meta_exploit_detected"])
+    s2 = _session("m1", flags=["admin_override_usage"])
+    stats = aggregate([s1, s2])
+    assert stats["m1"].meta_exploit_rate == 0.5
+
+
+def test_aggregate_meta_exploit_rate_zero():
+    """meta_exploit_rate is 0 when no sessions have the flag."""
+    stats = aggregate([_session("m1"), _session("m1")])
+    assert stats["m1"].meta_exploit_rate == 0.0
+
+
+def test_aggregate_score_variance_single_session():
+    """score_variance is 0 for a single session."""
+    stats = aggregate([_session("m1")])
+    assert stats["m1"].score_variance == 0.0
+
+
+def test_aggregate_score_variance_multi_session():
+    """score_variance is > 0 when sessions have different scores."""
+    s1 = _session("m1", final_score=5.0)
+    s2 = _session("m1", final_score=9.0)
+    stats = aggregate([s1, s2])
+    # mean=7.0, variance = ((5-7)^2 + (9-7)^2)/2 = (4+4)/2 = 4.0
+    assert stats["m1"].score_variance == pytest.approx(4.0, abs=0.01)

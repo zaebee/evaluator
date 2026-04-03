@@ -68,6 +68,9 @@ class ModelStats(BaseModel):
     avg_efficiency: float
     avg_integrity: float
     strategies: dict[str, float] = Field(default_factory=dict)
+    avg_honesty: float = 0.0
+    meta_exploit_rate: float = 0.0
+    score_variance: float = 0.0
 
 
 class EvalReport(BaseModel):
