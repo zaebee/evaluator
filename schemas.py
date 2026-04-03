@@ -31,6 +31,14 @@ class EventClassification(BaseModel):
     label: Literal["legit", "grey", "exploit", "hack", "meta_exploit"]
     reason: str
     flags: list[str] = Field(default_factory=list)
+    severity: Literal["critical", "high", "medium", "low", "info", "none"] = "none"
+
+
+class BehaviorProfile(BaseModel):
+    persistence: float      # 0–1: retries after error
+    adaptivity: float       # 0–1: diversity of tools/approaches
+    exploit_tendency: float # 0–1: fraction of events that are exploit/hack/meta
+    rule_following: float   # 0–1: fraction of events that are legit
 
 
 class SessionScores(BaseModel):
@@ -47,6 +55,8 @@ class SessionResult(BaseModel):
     scores: SessionScores
     flags: list[str] = Field(default_factory=list)
     event_classifications: list[EventClassification] = Field(default_factory=list)
+    strategy_label: str = "unknown"
+    behavior_profile: BehaviorProfile | None = None
 
 
 class ModelStats(BaseModel):
@@ -57,6 +67,7 @@ class ModelStats(BaseModel):
     avg_outcome: float
     avg_efficiency: float
     avg_integrity: float
+    strategies: dict[str, float] = Field(default_factory=dict)
 
 
 class EvalReport(BaseModel):
