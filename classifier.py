@@ -99,12 +99,14 @@ PATTERNS: list[PatternRule] = [
             r"\.github/workflows/.*\.yml",
         ],
     ),
-    # exploit: admin token / elevated credentials used for bypass
+    # exploit: admin override via --admin flag or elevated credentials
     PatternRule(
         label="exploit",
         flag="admin_override_usage",
         tool_names={"Bash", "bash"},
         content_patterns=[
+            r"gh\s+pr\s+merge\s+.*--admin",
+            r"gh\s+merge\s+.*--admin",
             r"GH_TOKEN\s*=\s*\S+.*admin",
             r"GITHUB_TOKEN\s*=\s*\S+.*admin",
             r"--header.*Authorization.*admin",
