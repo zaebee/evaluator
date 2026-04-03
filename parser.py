@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +23,28 @@ def _parse_dt(value: str | None) -> datetime | None:
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
+        return None
+
+
+_OPENCODE_DT_PAT = re.compile(
+    r'(\d+)/(\d+)/(\d{4}),\s*(\d+):(\d+):(\d+)\s*(AM|PM)', re.IGNORECASE
+)
+
+
+def _parse_opencode_dt(value: str) -> datetime | None:
+    """Parse US-format datetime like '4/3/2026, 10:08:07 PM' into UTC datetime."""
+    m = _OPENCODE_DT_PAT.search(value)
+    if not m:
+        return None
+    month, day, year, hour, minute, second, ampm = m.groups()
+    h = int(hour)
+    if ampm.upper() == "PM" and h != 12:
+        h += 12
+    elif ampm.upper() == "AM" and h == 12:
+        h = 0
+    try:
+        return datetime(int(year), int(month), int(day), h, int(minute), int(second), tzinfo=timezone.utc)
+    except ValueError:
         return None
 
 
@@ -269,9 +292,167 @@ class MistralParser:
         )
 
 
+class OpenCodeParser:
+    """Parser for OpenCode markdown session traces.
+
+    Format:
+        **Session ID:** <id>
+        **Created:** <US datetime>
+        **Updated:** <US datetime>
+
+        ## Assistant (Family · model-name · Xs)
+
+        **Tool: bash**
+
+        **Input:**
+        ```json
+        {"command": "...", ...}
+        ```
+
+        **Output:**
+        ```
+        ...output...
+        ```
+    """
+
+    _SESSION_ID_PAT = re.compile(r'\*\*Session ID:\*\*\s+(\S+)')
+    _CREATED_PAT = re.compile(r'\*\*Created:\*\*\s+(.+)')
+    _UPDATED_PAT = re.compile(r'\*\*Updated:\*\*\s+(.+)')
+    _TURN_PAT = re.compile(r'^## Assistant \(([^)]+)\)', re.MULTILINE)
+    _TOOL_NAME_PAT = re.compile(r'^\*\*Tool:\s+(\w[\w-]*)\*\*\s*$')
+
+    def parse(self, path: str | Path) -> SessionTrace:
+        path = Path(path)
+        text = path.read_text(encoding="utf-8")
+        lines = text.splitlines()
+
+        # --- Metadata ---
+        sid_m = self._SESSION_ID_PAT.search(text)
+        session_id = sid_m.group(1) if sid_m else path.stem
+
+        created_m = self._CREATED_PAT.search(text)
+        started_at = _parse_opencode_dt(created_m.group(1)) if created_m else _utcnow()
+
+        updated_m = self._UPDATED_PAT.search(text)
+        ended_at = _parse_opencode_dt(updated_m.group(1)) if updated_m else None
+
+        # Model from first Assistant heading: "Build · minimax-m2.5-free · 3.9s"
+        model = "opencode"
+        turn_m = self._TURN_PAT.search(text)
+        if turn_m:
+            parts = [p.strip() for p in turn_m.group(1).split("·")]
+            if len(parts) >= 2:
+                model = parts[1]
+
+        events: list[NormalizedEvent] = []
+        event_index = 0
+
+        # Preamble (before first ## Assistant) → user_input
+        first_turn = self._TURN_PAT.search(text)
+        if first_turn:
+            preamble = text[: first_turn.start()].strip()
+            if preamble:
+                events.append(NormalizedEvent(
+                    event_id=_make_id(session_id, event_index),
+                    session_id=session_id,
+                    timestamp=started_at or _utcnow(),
+                    role="user",
+                    event_type="user_input",
+                    tool_name=None,
+                    content=preamble[:2000],
+                ))
+                event_index += 1
+
+        # State machine: parse tool call/result pairs
+        # States: IDLE, WANT_INPUT, INPUT_BLOCK_START, IN_INPUT,
+        #         WANT_OUTPUT, OUTPUT_BLOCK_START, IN_OUTPUT
+        state = "IDLE"
+        current_tool: str | None = None
+        input_lines: list[str] = []
+        output_lines: list[str] = []
+        ts = started_at or _utcnow()
+
+        for line in lines:
+            stripped = line.rstrip()
+
+            if state == "IDLE":
+                m = self._TOOL_NAME_PAT.match(stripped)
+                if m:
+                    current_tool = m.group(1)
+                    state = "WANT_INPUT"
+
+            elif state == "WANT_INPUT":
+                if stripped == "**Input:**":
+                    state = "INPUT_BLOCK_START"
+
+            elif state == "INPUT_BLOCK_START":
+                if stripped.startswith("```"):
+                    input_lines = []
+                    state = "IN_INPUT"
+
+            elif state == "IN_INPUT":
+                if stripped == "```":
+                    state = "WANT_OUTPUT"
+                else:
+                    input_lines.append(stripped)
+
+            elif state == "WANT_OUTPUT":
+                if stripped == "**Output:**":
+                    state = "OUTPUT_BLOCK_START"
+
+            elif state == "OUTPUT_BLOCK_START":
+                if stripped.startswith("```"):
+                    output_lines = []
+                    state = "IN_OUTPUT"
+
+            elif state == "IN_OUTPUT":
+                if stripped == "```":
+                    input_content = "\n".join(input_lines)
+                    output_content = "\n".join(output_lines)
+
+                    events.append(NormalizedEvent(
+                        event_id=_make_id(session_id, event_index),
+                        session_id=session_id,
+                        timestamp=ts,
+                        role="assistant",
+                        event_type="tool_call",
+                        tool_name=current_tool,
+                        content=input_content[:2000],
+                    ))
+                    event_index += 1
+
+                    events.append(NormalizedEvent(
+                        event_id=_make_id(session_id, event_index),
+                        session_id=session_id,
+                        timestamp=ts,
+                        role="user",
+                        event_type="tool_result",
+                        tool_name=current_tool,
+                        content=output_content[:500],
+                    ))
+                    event_index += 1
+
+                    current_tool = None
+                    input_lines = []
+                    output_lines = []
+                    state = "IDLE"
+                else:
+                    output_lines.append(stripped)
+
+        return SessionTrace(
+            session_id=session_id,
+            model=model,
+            started_at=started_at or _utcnow(),
+            ended_at=ended_at,
+            events=events,
+            raw_stats={},
+        )
+
+
 def load_sessions(paths: list[str]) -> list[SessionTrace]:
     claude = ClaudeParser()
     mistral = MistralParser()
+    opencode = OpenCodeParser()
     sessions: list[SessionTrace] = []
 
     for raw_path in paths:
@@ -302,6 +483,12 @@ def load_sessions(paths: list[str]) -> list[SessionTrace]:
                         sessions.append(claude.parse(jf))
                     except Exception as exc:
                         logger.warning("Failed to parse %s: %s", jf, exc)
+        elif p.is_file() and p.suffix == ".md":
+            try:
+                sessions.append(opencode.parse(p))
+            except Exception as exc:
+                logger.warning("Failed to parse OpenCode trace %s: %s", p, exc)
+
         else:
             logger.warning("Cannot detect format for path: %s", p)
 
