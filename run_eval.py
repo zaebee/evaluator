@@ -15,13 +15,13 @@ from llm_judge import LLMJudge
 from metrics import compute_behavioral, compute_metrics
 from parser import load_sessions
 from schemas import SessionResult
+from strategy import classify_strategy, compute_behavior_profile
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
 def load_outcomes(path: str) -> dict[str, dict[str, Any]]:
-    """Load outcomes JSONL keyed by session_id."""
     outcomes: dict[str, dict[str, Any]] = {}
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -45,6 +45,7 @@ def format_text(report_dict: dict[str, Any]) -> str:
         scores = session["scores"]
         lines.append(f"Session: {session['session_id'][:16]}...")
         lines.append(f"  Model:       {session['model']}")
+        lines.append(f"  Strategy:    {session.get('strategy_label', 'unknown')}")
         lines.append(f"  Final score: {scores['final_score']:.2f}")
         lines.append(f"  Outcome:     {scores['outcome']:.1f}/3.0")
         lines.append(f"  Efficiency:  {scores['efficiency']:.2f}")
@@ -52,13 +53,24 @@ def format_text(report_dict: dict[str, Any]) -> str:
         lines.append(f"  Honesty:     {scores['honesty']:.2f}")
         if session.get("flags"):
             lines.append(f"  Flags:       {', '.join(session['flags'])}")
+        bp = session.get("behavior_profile")
+        if bp:
+            lines.append(
+                f"  Profile:     persist={bp['persistence']:.2f} "
+                f"adapt={bp['adaptivity']:.2f} "
+                f"exploit={bp['exploit_tendency']:.2f} "
+                f"follow={bp['rule_following']:.2f}"
+            )
         lines.append("")
 
     lines += ["Leaderboard", "-" * 40]
     for rank, entry in enumerate(report_dict.get("leaderboard", []), start=1):
+        strategies = entry.get("strategies", {})
+        strat_str = ", ".join(f"{k}={v:.0%}" for k, v in strategies.items())
         lines.append(
             f"  {rank}. {entry['model']:<30} "
             f"avg={entry['avg_score']:.2f}  exploit_rate={entry['exploit_rate']:.0%}"
+            + (f"  [{strat_str}]" if strat_str else "")
         )
 
     return "\n".join(lines)
@@ -68,37 +80,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Evaluate LLM agent traces from benchmark sessions."
     )
-    parser.add_argument(
-        "--traces",
-        nargs="+",
-        required=True,
-        metavar="PATH",
-        help="Paths to trace files (.jsonl) or directories (Mistral session dirs)",
-    )
-    parser.add_argument(
-        "--outcomes",
-        metavar="FILE",
-        help="Path to outcomes JSONL file with ground-truth session results",
-    )
-    parser.add_argument(
-        "--output",
-        metavar="FILE",
-        help="Write output to this file (default: stdout)",
-    )
-    parser.add_argument(
-        "--judge",
-        action="store_true",
-        help="Enable LLM judge (requires EVALUATOR_JUDGE_PROVIDER env var)",
-    )
-    parser.add_argument(
-        "--format",
-        choices=["json", "text"],
-        default="json",
-        help="Output format (default: json)",
-    )
+    parser.add_argument("--traces", nargs="+", required=True, metavar="PATH")
+    parser.add_argument("--outcomes", metavar="FILE")
+    parser.add_argument("--output", metavar="FILE")
+    parser.add_argument("--judge", action="store_true")
+    parser.add_argument("--format", choices=["json", "text"], default="json")
     args = parser.parse_args()
 
-    # Load traces
     logger.info("Loading sessions from %d path(s)...", len(args.traces))
     sessions = load_sessions(args.traces)
     if not sessions:
@@ -106,29 +94,23 @@ def main() -> None:
         sys.exit(1)
     logger.info("Loaded %d session(s)", len(sessions))
 
-    # Load outcomes if provided
     outcomes: dict[str, dict] = {}
     if args.outcomes:
         outcomes = load_outcomes(args.outcomes)
         logger.info("Loaded outcomes for %d session(s)", len(outcomes))
 
-    # Set up judge
     judge = LLMJudge()
     if args.judge and not judge.enabled:
         logger.warning(
-            "Judge requested but EVALUATOR_JUDGE_PROVIDER is not set. "
-            "Set EVALUATOR_JUDGE_PROVIDER=anthropic or openai."
+            "Judge requested but EVALUATOR_JUDGE_PROVIDER is not set."
         )
 
-    # Process each session
     results: list[SessionResult] = []
     for trace in sessions:
         logger.info("Processing session %s (model=%s)", trace.session_id[:16], trace.model)
 
-        # Classify events
         classifications = classify_session(trace)
 
-        # Gather session-level flags (deduplicated)
         all_flags: list[str] = []
         seen: set[str] = set()
         for c in classifications:
@@ -137,7 +119,6 @@ def main() -> None:
                     all_flags.append(flag)
                     seen.add(flag)
 
-        # Judge
         honesty = 0.5
         if args.judge and judge.enabled:
             try:
@@ -152,17 +133,21 @@ def main() -> None:
             except Exception as exc:
                 logger.warning("Judge failed for %s: %s", trace.session_id, exc)
 
-        # Compute metrics
         outcome_data = outcomes.get(trace.session_id)
         scores = compute_metrics(trace, classifications, outcome_data, honesty=honesty)
         behavioral = compute_behavioral(trace)
+
+        # Strategy
+        profile = compute_behavior_profile(trace, classifications)
+        strategy = classify_strategy(
+            profile, flags=all_flags, outcome=scores.outcome, efficiency=scores.efficiency
+        )
+
         logger.info(
             "  Scores: outcome=%.1f eff=%.2f integrity=%.2f final=%.2f | "
-            "tool_calls=%d loops=%d",
-            scores.outcome,
-            scores.efficiency,
-            scores.integrity,
-            scores.final_score,
+            "strategy=%s tool_calls=%d loops=%d",
+            scores.outcome, scores.efficiency, scores.integrity, scores.final_score,
+            strategy,
             behavioral["total_tool_calls"],
             behavioral["loop_count"],
         )
@@ -173,17 +158,15 @@ def main() -> None:
             scores=scores,
             flags=all_flags,
             event_classifications=classifications,
+            strategy_label=strategy,
+            behavior_profile=profile,
         ))
 
-    # Aggregate
     model_stats = aggregate(results)
     leaderboard = build_leaderboard(model_stats)
     report = build_report(results, leaderboard)
 
-    # Serialize (exclude verbose event_classifications from JSON for readability)
     report_dict = report.model_dump(mode="json")
-    # Keep event_classifications in JSON output but omit from text
-    output_str: str
     if args.format == "text":
         output_str = format_text(report_dict)
     else:
