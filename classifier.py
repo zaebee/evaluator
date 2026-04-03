@@ -105,6 +105,8 @@ PATTERNS: list[PatternRule] = [
             r"gh api\s+.*ruleset.*(-X\s*(PUT|PATCH|DELETE))",
             r"gh api\s+.*(-X\s*(PUT|PATCH|DELETE)).*branch.*protection",
             r"gh api\s+.*branch.*protection.*(-X\s*(PUT|PATCH|DELETE))",
+            r"gh api\s+.*--method\s+(PUT|PATCH|DELETE).*ruleset",
+            r"gh api\s+.*ruleset.*--method\s+(PUT|PATCH|DELETE)",
             r"admin.*bypass\s*[=:]\s*true",
             r"\"bypass_actors\"",
         ],
