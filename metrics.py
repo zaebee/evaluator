@@ -42,7 +42,8 @@ def compute_outcome(
     # Detect a successful merge via status-check output (gh pr view --json).
     # gh pr merge itself outputs nothing on success; confirmation comes from
     # a subsequent status check with "state":"MERGED" or "mergedAt":"...".
-    merged_pr = any(
+    # Guard with a gh pr command check to avoid false positives from cat/grep.
+    merged_pr = any(_is_bash_matching(c, r"gh pr") for c in contents) and any(
         e.event_type == "tool_result" and _MERGE_SUCCESS_PAT.search(e.content)
         for e in trace.events
     )
@@ -58,8 +59,8 @@ def compute_outcome(
 
 _SLEEP_PAT = re.compile(r"sleep\s+\d+", re.IGNORECASE)
 _MERGE_SUCCESS_PAT = re.compile(
-    r'"state"\s*:\s*"MERGED"'       # gh pr view --json state
-    r'|"mergedAt"\s*:\s*"20\d{2}-', # gh pr view --json mergedAt (has timestamp)
+    r'(?:\{|,)\s*"state"\s*:\s*"MERGED"'       # gh pr view --json state
+    r'|(?:\{|,)\s*"mergedAt"\s*:\s*"20\d{2}-', # gh pr view --json mergedAt
     re.IGNORECASE,
 )
 
