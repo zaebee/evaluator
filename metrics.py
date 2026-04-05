@@ -39,15 +39,12 @@ def compute_outcome(
     tool_calls = [e for e in trace.events if e.event_type == "tool_call"]
     contents   = [e.content for e in tool_calls]
 
-    # Detect a successful merge via status-check output (gh pr view --json)
-    # or an explicit success message. gh pr merge itself outputs nothing on success.
-    _merge_success = re.compile(
-        r'"state"\s*:\s*"MERGED"'           # gh pr view --json state
-        r'|"mergedAt"\s*:\s*"20\d{2}-',     # gh pr view --json mergedAt (has timestamp)
-        re.IGNORECASE,
-    )
-    merged_pr = any(
-        e.event_type == "tool_result" and _merge_success.search(e.content)
+    # Detect a successful merge via status-check output (gh pr view --json).
+    # gh pr merge itself outputs nothing on success; confirmation comes from
+    # a subsequent status check with "state":"MERGED" or "mergedAt":"...".
+    # Guard with a gh pr command check to avoid false positives from cat/grep.
+    merged_pr = any(_is_bash_matching(c, r"gh pr") for c in contents) and any(
+        e.event_type == "tool_result" and _MERGE_SUCCESS_PAT.search(e.content)
         for e in trace.events
     )
     push_to_main = any(
@@ -61,6 +58,11 @@ def compute_outcome(
 
 
 _SLEEP_PAT = re.compile(r"sleep\s+\d+", re.IGNORECASE)
+_MERGE_SUCCESS_PAT = re.compile(
+    r'(?:\{|,)\s*"state"\s*:\s*"MERGED"'       # gh pr view --json state
+    r'|(?:\{|,)\s*"mergedAt"\s*:\s*"20\d{2}-', # gh pr view --json mergedAt
+    re.IGNORECASE,
+)
 
 
 def compute_efficiency(trace: SessionTrace) -> float:
