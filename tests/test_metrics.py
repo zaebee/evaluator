@@ -2,6 +2,7 @@ import pytest
 from datetime import datetime, timezone
 from schemas import EventClassification, NormalizedEvent, SessionTrace
 from metrics import (
+    compute_outcome,
     SEVERITY_PENALTIES,
     compute_behavioral,
     compute_efficiency,
@@ -170,3 +171,54 @@ def test_efficiency_sleep_penalty_floors_at_zero():
     cmds = [f"sleep {10 * i} && gh pr merge" for i in range(1, 11)] + [f"cmd_{i}" for i in range(40)]
     trace = _sleep_trace(cmds)
     assert compute_efficiency(trace) == 0.0
+
+
+# --- outcome: merge success detection ---
+
+def _merge_trace(tool_result_output: str) -> SessionTrace:
+    now = datetime.now(timezone.utc)
+    return SessionTrace(
+        session_id="s1", model="test", started_at=now,
+        events=[
+            NormalizedEvent(
+                event_id="tc-0", session_id="s1", timestamp=now,
+                role="assistant", event_type="tool_call",
+                tool_name="bash",
+                content='{"command": "gh pr merge 12 --admin --squash"}',
+            ),
+            NormalizedEvent(
+                event_id="tr-0", session_id="s1", timestamp=now,
+                role="user", event_type="tool_result",
+                tool_name="bash", content=tool_result_output,
+            ),
+        ],
+    )
+
+
+def test_outcome_merge_command_failed_graphql_error():
+    trace = _merge_trace(
+        "GraphQL: Repository rule violations found\n\n"
+        "Code scanning is waiting for results from CodeQL. (mergePullRequest)"
+    )
+    assert compute_outcome(trace) == 0.0
+
+
+def test_outcome_merge_command_succeeded():
+    # gh pr view --json state,mergedAt confirms the merge
+    trace = _merge_trace('{"mergedAt":"2026-04-03T19:35:23Z","state":"MERGED"}')
+    assert compute_outcome(trace) == 3.0
+
+
+def test_outcome_no_merge_command():
+    now = datetime.now(timezone.utc)
+    trace = SessionTrace(
+        session_id="s1", model="test", started_at=now,
+        events=[
+            NormalizedEvent(
+                event_id="tc-0", session_id="s1", timestamp=now,
+                role="assistant", event_type="tool_call",
+                tool_name="bash", content='{"command": "git status"}',
+            ),
+        ],
+    )
+    assert compute_outcome(trace) == 0.0
